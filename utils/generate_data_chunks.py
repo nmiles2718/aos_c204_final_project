@@ -158,7 +158,7 @@ def do_img_transformation(
     return img_data, imgs_stacked
 
 
-def visualize_chunk_img(imgs, chunk_num=0, icme=0):
+def visualize_chunk_img(imgs, chunk_num=None, icme=0):
     values = imgs.values()
     keys = imgs.keys()
     fig = plt.figure(figsize=(7, 4))
@@ -177,8 +177,12 @@ def visualize_chunk_img(imgs, chunk_num=0, icme=0):
         )
         ax.set_title(key)
         ax.grid(False)
+    if chunk_num is None:
+        t = f'ICME {icme:0.0f}'
+    else:
+        t = f'Chunk Number {chunk_num:0.0f}, ICME={icme:0.0f}'
     fig.suptitle(
-        t=f'Chunk Number {chunk_num:0.0f}, ICME={icme:0.0f}',
+        t=t,
         x=0.5,
         y=0.95
     )
@@ -194,10 +198,11 @@ def visualize_chunk_ts(
                 'BY(RTN)',
                 'BZ(RTN)',
                 'VP_RTN',
+                'NP'
                 'TEMPERATURE',
                 'BETA'
         ),
-        chunk_num=0,
+        chunk_num=None,
         icme=0,
         icme_date=None
 ):
@@ -210,6 +215,7 @@ def visualize_chunk_ts(
         (-15, 15),
         (-15, 15),
         (200, 800),
+        (0, 100),
         (5e3, 1e6),
         (-5, 75)
     ]
@@ -252,8 +258,12 @@ def visualize_chunk_ts(
             show_offset=True
         )
     )
+    if chunk_num is None:
+        t = f'ICME {icme:0.0f}'
+    else:
+        t = f'Chunk Number {chunk_num:0.0f}, ICME={icme:0.0f}'
     fig.suptitle(
-        f'Chunk Number {chunk_num:0.0f}, ICME={icme:0.0f}',
+        t=t,
         x=0.5,
         y=0.95
     )
@@ -288,14 +298,17 @@ def create_data_chunks(
     stride = dt.timedelta(days=1)
     while start_interval < end_date - window_size:
         intervals.append(slice(start_interval, end_interval))
-        start_interval += window_size / 2
-        end_interval += window_size / 2
+        start_interval += window_size / 8
+        end_interval += window_size / 8
     missing_periods = open(f'../data/st{instrument}_missing_data.txt', 'w')
     intervals_ts_pdf = PdfPages(f'st{instrument}_ts_intervals_visualized.pdf')
     # intervals_img_pdf = PdfPages(f'st{instrument}_img_intervals_visualized.pdf')
     interval_labels = {
-        'fname':[],
-        'label':[]
+        'fname': [],
+        'label': [],
+        'start_time': [],
+        'stop_time': [],
+        'shape': []
     }
     chunk_num = 1
     for i, interval in tqdm(enumerate(intervals), total=len(intervals)):
@@ -307,6 +320,21 @@ def create_data_chunks(
             missing_periods.write(f"{st} {et}\n")
             continue
         icme_interval_df = icme_df[interval]
+
+        interp_df = pd.DataFrame(
+            index=pd.date_range(
+                start=data_interval_df.index[0],
+                end=data_interval_df.index[-1],
+                freq='1min'
+            )
+        )
+        # The interpolated and smoothed data field
+        interp_df = (
+            data_interval_df
+                .reindex(data_interval_df.index.union(interp_df.index))
+                .interpolate(method='index', kind='linear')
+                .reindex(interp_df.index)
+        )
 
         # Check to see if there is even data in the interval
         data_span = (
@@ -338,31 +366,25 @@ def create_data_chunks(
         icme_date = None
         if icme_interval_df.shape[0] >= 1:
             icme_date = icme_interval_df.index[0]
-            if icme_date < interval.stop - window_size/3:
+            if icme_date < interval.stop - 2*window_size/3:
                 label = 1
                 LOG.info(f'Interval {st} {et} contains ICME!')
 
-        # check to see if there is anything missing data and if there is
-        # perform linear interpolation to fill the gaps.
 
-        # if stats_data['coverage'] < 1:
-        #     LOG.info(
-        #         f"Coverage of {stats_data['coverage']:0.2%}... interpolating"
-        #     )
-        #     data_interval_df = data_interval_df.interpolate(
-        #         method='linear', axis=0, inplace=False
-        #     )
-
-        smoothed = data_interval_df.rolling(
-            '20min', center=True, min_periods=15
+        smoothed = interp_df.rolling(
+            '5min', center=True
         ).mean()
-        resampled = smoothed.resample('5min', ).mean()
+        resampled = smoothed.resample('10min').mean()
         imgs_dict, imgs_stacked = do_img_transformation(
             df=resampled.dropna(),
             cols=resampled.columns
         )
         interval_labels['fname'].append(fout)
         interval_labels['label'].append(label)
+        interval_labels['start_time'].append(interval.start)
+        interval_labels['stop_time'].append(interval.stop)
+        interval_labels['shape'].append(resampled.shape)
+
         resampled.to_csv(
             f"../data/st{instrument}_chunks/{fout}",
             header=True,
@@ -375,31 +397,10 @@ def create_data_chunks(
             f"../data/st{instrument}_chunks/{fout_img}",
             imgs_stacked
         )
-        # Plot the time series data for each chunk
-        # fig = visualize_chunk_ts(
-        #     data_interval_df,
-        #     resampled,
-        #     cols=resampled.columns,
-        #     chunk_num=i,
-        #     icme=label,
-        #     icme_date=icme_date
-        # )
-        # intervals_ts_pdf.savefig(fig, bbox_inches='tight')
 
-        # Plot the corresponding image representation
-        # fig_img = visualize_chunk_img(
-        #     imgs_dict,
-        #     chunk_num=chunk_num,
-        #     icme=label
-        # )
-        # intervals_img_pdf.savefig(fig_img)
-        # plt.close(fig)
-        # plt.close(fig_img)
         chunk_num += 1
 
     missing_periods.close()
-    # intervals_ts_pdf.close()
-    # intervals_img_pdf.close()
     labeled_dataset = pd.DataFrame(interval_labels)
     labeled_dataset.to_csv(
         f'st{instrument}_dataset_labels.txt',
@@ -418,12 +419,13 @@ def main(instrument='a'):
         f'aos_c204_final_project/data/st{instrument}_icme_list.txt'
     )
     data_df = pd.read_csv(data_file, header=0, index_col=0, parse_dates=True)
+    print(data_df.columns)
     icme_df = pd.read_csv(icme_file, header=0, index_col=0, parse_dates=True)
     create_data_chunks(
         data_df=data_df,
         icme_df=icme_df,
         instrument=instrument,
-        window_size=dt.timedelta(days=2)
+        window_size=dt.timedelta(days=1.5)
     )
 
 
